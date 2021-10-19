@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 np.random.seed(seed=42)
 
-N = 1000
+N = 100
 M = 1
 T = 2000
 

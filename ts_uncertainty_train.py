@@ -9,7 +9,6 @@ MIT License
 """
 
 
-import pandas as pd
 import numpy as np
 import pickle
 import os
@@ -17,8 +16,8 @@ import matplotlib.pyplot as plt
 
 # TF imports
 import tensorflow as tf
-from tensorflow.python.keras.layers.convolutional import Conv2DTranspose
-from tensorflow.python.ops.gen_math_ops import mean
+from tensorflow.python.keras.backend import dtype
+from tensorflow.python.ops.gen_math_ops import Mul, mean
 physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
 	try:
@@ -31,9 +30,11 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from tensorflow import keras
 import tensorflow.keras.backend as K
 
-from tensorflow.keras.layers import Dense, Conv1D, BatchNormalization
-from tensorflow.keras.layers import Input, Lambda, Activation, Conv2DTranspose
+from tensorflow.keras.layers import Dense, Conv1D, BatchNormalization, Layer
+from tensorflow.keras.layers import Input, Lambda, Activation
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.initializers import GlorotNormal
+import tensorflow_probability as tfp
 
 # for manual training loop
 from sklearn.metrics import mean_squared_error
@@ -122,16 +123,102 @@ def build_tcn(seq_len,
 	return model, opt
 
 
-def build_tcn_cov(seq_len,
-				  input_dim,
-				  output_dim,
-				  dilation_rates,
-				  filters=8,
-				  kernel_size=5,
-				  hidden_units=[8],
-				  cov_factors=8,
-				  cov_kernel=2,
-				  cov_filters=4):
+class GaussianLayer(Layer):
+	def __init__(self, output_dim, **kwargs):
+		self.output_dim = output_dim
+		super(GaussianLayer, self).__init__(**kwargs)
+
+	def build(self, input_shape):
+		input_dim = input_shape[-1]
+		self.kernel_1 = self.add_weight(name='kernel_1', 
+									  shape=(input_dim, self.output_dim),
+									  initializer=GlorotNormal(),
+									  trainable=True)
+		self.kernel_2 = self.add_weight(name='kernel_2', 
+									  shape=(input_dim, self.output_dim),
+									  initializer=GlorotNormal(),
+									  trainable=True)
+		self.bias_1 = self.add_weight(name='bias_1',
+									shape=(self.output_dim, ),
+									initializer=GlorotNormal(),
+									trainable=True)
+		self.bias_2 = self.add_weight(name='bias_2',
+									shape=(self.output_dim, ),
+									initializer=GlorotNormal(),
+									trainable=True)
+		super(GaussianLayer, self).build(input_shape) 
+
+	def call(self, x):
+		output_mu  = K.dot(x, self.kernel_1) + self.bias_1
+		output_sig = K.dot(x, self.kernel_2) + self.bias_2
+		output_sig_pos = K.log(1 + K.exp(output_sig)) + 1e-06  
+		return [output_mu, output_sig_pos]
+
+	def compute_output_shape(self, input_shape):
+		return [(input_shape[0], self.output_dim), (input_shape[0], self.output_dim)]
+
+
+class MultivariateGaussian(Layer):
+	def __init__(self, output_dim, **kwargs):
+		self.output_dim = output_dim
+		super(MultivariateGaussian, self).__init__(**kwargs)
+
+	def build(self, input_shape):
+		input_dim = input_shape[-1]
+		print(input_dim)
+		# mu weights
+		self.mu_kernel = self.add_weight(name='mu_kernel', 
+										 shape=(input_dim, self.output_dim),
+										 initializer=GlorotNormal(),
+										 trainable=True)
+		# covariance weights
+		self.cov_kernel = self.add_weight(name='cov_kernel',
+										  shape=(input_dim, input_dim),
+										  initializer=GlorotNormal(),
+										  trainable=True)
+		# idiosyncratic variance kernel
+		self.idio_kernel = self.add_weight(name='idio_kernel', 
+										   shape=(input_dim, self.output_dim),
+										   initializer=GlorotNormal(),
+										   trainable=True)
+		# mu bias
+		self.mu_bias = self.add_weight(name='mu_bias',
+									   shape=(self.output_dim, ),
+									   initializer=GlorotNormal(),
+									   trainable=True)
+		# idiosyncratic variance bias
+		self.idio_bias = self.add_weight(name='idio_bias',
+										 shape=(self.output_dim, ),
+										 initializer=GlorotNormal(),
+										 trainable=True)
+		# number of entries in lower triangular matrix is N(N + 1) / 2
+		ones = tf.ones(int(input_dim * (input_dim + 1) / 2))
+		self.mask = tfp.math.fill_triangular(ones)
+		super(MultivariateGaussian, self).build(input_shape) 
+
+	def call(self, x):
+		cov = self.cov_kernel * self.mask
+		cov = K.dot(cov, K.transpose(cov)) # + tf.linalg.diag(self.cov_bias)
+		# cov = K.dot(x, self.cov_kernel) + self.cov_bias
+		output_mu  = K.dot(x, self.mu_kernel) + self.mu_bias
+		idio_var = K.dot(x, self.idio_kernel) + self.idio_bias
+		idio_var = tf.squeeze(idio_var)
+		output_cov = K.dot(K.dot(x, cov), K.transpose(x)) + tf.linalg.diag(idio_var)
+		# cov = K.dot(K.dot(x, cov), K.transpose(x))
+		# output_cov = K.log(1 + K.exp(cov)) + 1e-06
+		return [output_mu, output_cov]
+
+	def compute_output_shape(self, input_shape):
+		return [(input_shape[0], self.output_dim), (input_shape[0], input_shape[0])]
+
+
+def build_gaussian_tcn(seq_len,
+					   input_dim,
+					   output_dim,
+					   dilation_rates,
+					   filters=8,
+					   kernel_size=5,
+					   hidden_units=[8]):
 	nn = input_layer = Input(shape=(seq_len, input_dim))
 
 	for i, d in enumerate(dilation_rates):
@@ -144,28 +231,12 @@ def build_tcn_cov(seq_len,
 
 	nn = latent = Lambda(lambda x: x[:, -1, :])(nn)
 
-	# prediction layer
 	for u in hidden_units:
 		nn = Dense(u, activation='relu')(nn)
 
-	output_layer = Dense(output_dim, activation='linear')(nn)
+	output_layer = GaussianLayer(output_dim)(nn)
 
-	# factor exposure and coviarance
-	exposures = Dense(cov_factors, activation='linear')(latent)
-
-	cov = K.expand_dims(latent)
-	cov = K.expand_dims(cov)
-	cov = Conv2DTranspose(cov_filters,
-						  cov_kernel,
-						  strides=(1, cov_factors),
-						  padding='same',
-						  activation='relu')(cov)
-	cov = Conv2DTranspose(1,
-						  cov_kernel,
-						  padding='same')(cov)
-
-
-	model = keras.Model(input_layer, [output_layer, exposures, cov])
+	model = keras.Model(input_layer, output_layer)
 	opt = Adam(lr=0.01)
 	model.compile(loss='mse', optimizer=opt)
 
@@ -173,30 +244,79 @@ def build_tcn_cov(seq_len,
 
 
 # manually calculate MSE
-def train_mse(model, x, y):
-	y_ = model(x)
+def mse(y, y_):
 	return K.mean(K.square(y - y_), axis=0)
 
 
-def test_mse(model, x, y):
-	y_ = model.predict(x)
-	return mean_squared_error(y, y_)
+# negative log-likelihood multivariate normal
+def nll(y, out):
+	u, v = out
+	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
+	return tf.reduce_mean(0.5 * tf.math.log(v) +
+		0.5 * tf.math.divide(tf.math.square(y - u), v)) + 1e-6
 
 
-def train_mse_cov(model, x, y):
-	y_, exposures, cov = model(x)
-	e = y - y_
-	with tf.stop_recording():
-		S = e @ e.T
-		L = tf.linalg.cholesky(S)
-		mask = np.tril(np.ones_like(L))
+# negative log-likelihood
+def nll_mvn(y, out):
+	u, v = out
+	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
+	e = y - u
+	return tf.reduce_mean(0.5 * tf.math.log(tf.linalg.det(v)) +
+		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e)) + 1e-6
 
-	return K.mean(K.square(e), axis=0) + K.mean(K.square(exposures @ L - exposures @ (mask * cov)))
+
+def squared_error(y, out):
+	u, v = out
+	e = y - u
+	return tf.reduce_mean(tf.square(e)) + tf.reduce_mean(e @ tf.transpose(e) - v)
+
+
+def build_mvn_tcn(seq_len,
+				  input_dim,
+				  output_dim,
+				  dilation_rates,
+				  filters=8,
+				  kernel_size=5,
+				  hidden_units=[8]):
+	nn = input_layer = Input(shape=(seq_len, input_dim))
+
+	for i, d in enumerate(dilation_rates):
+		nn = Conv1D(dilation_rate=d,
+					filters=filters,
+					kernel_size=kernel_size,
+					padding='causal')(nn)
+		nn = BatchNormalization()(nn)
+		nn = Activation('relu')(nn)
+
+	nn = Lambda(lambda x: x[:, -1, :])(nn)
+
+	for u in hidden_units:
+		nn = Dense(u, activation='relu')(nn)
+
+	output_layer = MultivariateGaussian(output_dim)(nn)
+
+	model = keras.Model(input_layer, output_layer)
+	opt = Adam(lr=0.01)
+	model.compile(loss=nll_mvn, optimizer=opt)
+
+	return model, opt
+
+
+# def train_mse_cov(model, x, y):
+# 	y_, exposures, cov = model(x)
+# 	e = y - y_
+# 	with tf.stop_recording():
+# 		S = e @ e.T
+# 		L = tf.linalg.cholesky(S)
+# 		mask = np.tril(np.ones_like(L))
+
+# 	return K.mean(K.square(e), axis=0) + K.mean(K.square(exposures @ L - exposures @ (mask * cov)))
 
 
 def calc_gradient(model, x, y, loss_fn):
 	with tf.GradientTape() as tape:
-		loss = loss_fn(model, x, y)
+		y_ = model(x)
+		loss = loss_fn(y, y_)
 		grads = tape.gradient(loss, model.trainable_variables)
 	return loss, grads
 
@@ -222,6 +342,9 @@ def train_model(model,
 	best_epochs = 0
 	counter = 0
 
+	test_X = tf.convert_to_tensor(test_X)
+	test_y = tf.convert_to_tensor(test_y)
+
 	for e in range(max_epochs):
 		permutations = np.random.permutation(N)
 		sum_loss = 0.
@@ -237,7 +360,10 @@ def train_model(model,
 			sum_loss += loss
 
 		sum_loss = sum_loss / B
-		val_loss = test_criterion(model, test_X, test_y)
+		y_ = model.predict(test_X, batch_size=test_X.shape[0])
+		val_loss = test_criterion(test_y, y_)
+		if isinstance(val_loss, tf.Tensor):
+			val_loss = val_loss.numpy().item()
 
 		print(f'| Epoch {e}/{max_epochs} - loss: {loss:.4f} - val {val_loss:.4f}')
 
@@ -257,25 +383,6 @@ def train_model(model,
 			break
 
 	return model
-
-
-# receptive field = 1 + layers_per_block * (kernel - 1) * stacks * sum(dilation)
-model, opt = build_tcn(seq_len,
-	input_dim,
-	input_dim,
-	[1, 2, 4, 8],
-	filters=8,
-	kernel_size=5,
-	hidden_units=[8])
-
-model = train_model(model,
-	opt,
-	train_mse,
-	test_mse,
-	train_X,
-	train_y,
-	test_X,
-	test_y)
 
 
 # predict for each period
@@ -305,6 +412,139 @@ def forecast(model, predict_data, seq_len=50, forward=10, stride=1):
 	return np.concatenate(y_true, axis=1), np.concatenate(y_pred, axis=1)
 
 
+# predict for each period
+def forecast_gaussian(model, predict_data, seq_len=50, forward=10, stride=1):
+	"""Step through the out-of-sample data and make predictions.
+
+	Args:
+		model (keras.Model): Trained model.
+		predict_data (numpy.array): Out-of-sample data.
+		seq_len (int): Sequence length.
+		forward (int): Forward.
+		stride (int): Step size.
+
+	Returns:
+		numpy.array: Predicted values.
+
+	"""
+
+	T = predict_data.shape[1]
+	y_true = []
+	y_pred = []
+	y_var = []
+	for t in range(seq_len, T - forward, stride):
+		y_true.append(predict_data[:,t + forward - 1,:])
+		X = predict_data[:,t-seq_len:t,:]
+		u, v = model.predict(X, batch_size=X.shape[0])
+		y_pred.append(u)
+		y_var.append(v)
+
+	return (np.concatenate(y_true, axis=1),
+			np.concatenate(y_pred, axis=1),
+			np.concatenate(y_var, axis=1))
+
+
+# build multivariate normal network
+model, opt = build_mvn_tcn(seq_len,
+	input_dim,
+	input_dim,
+	[1, 2, 4, 8],
+	filters=16,
+	kernel_size=5,
+	hidden_units=[16, 8])
+
+model = train_model(model,
+	opt,
+	nll_mvn,
+	nll_mvn,
+	train_X,
+	train_y,
+	test_X,
+	test_y,
+	batch_size=10)
+
+
+# dummy example
+M = 2
+x = np.random.normal(0., 1., size=(1000, M)).astype('float32')
+y = np.atleast_2d(x.sum(axis=-1) + np.random.normal(0., 0.1, size=1000).astype('float32')).T
+
+input_layer = Input(shape=(M))
+output_layer = MultivariateGaussian(1)(input_layer)
+
+model = keras.Model(input_layer, output_layer)
+opt = Adam(lr=0.01)
+model.compile(loss='mse', optimizer=opt)
+
+model = train_model(model,
+	opt,
+	nll_mvn,
+	nll_mvn,
+	x[:500,:],
+	y[:500,:],
+	x[500:,:],
+	y[500:,:],
+	batch_size=50)
+
+
+"""
+Univariate Gaussian network example.
+"""
+
+model, opt = build_gaussian_tcn(seq_len,
+	input_dim,
+	input_dim,
+	[1, 2, 4, 8],
+	filters=16,
+	kernel_size=5,
+	hidden_units=[16, 8])
+
+model = train_model(model,
+	opt,
+	nll,
+	nll,
+	train_X,
+	train_y,
+	test_X,
+	test_y)
+
+
+y_true, y_pred, y_var = forecast_gaussian(model, predict_data, seq_len=seq_len,
+	forward=forward, stride=1)
+
+x_axis = np.arange(y_true.shape[1])
+fig, ax = plt.subplots()
+ax.plot(x_axis, y_true[0,:], label='true')
+ax.plot(x_axis, y_pred[0,:], label='pred')
+ax.plot(x_axis, y_pred[0,:] + np.sqrt(y_var[0,:]), label='pred+std', linestyle='dotted', color='red')
+ax.plot(x_axis, y_pred[0,:] - np.sqrt(y_var[0,:]), label='pred-std', linestyle='dotted', color='red')
+plt.tight_layout()
+plt.show()
+plt.clf()
+
+
+"""
+Normal non-probabilistic network example.
+"""
+# receptive field = 1 + layers_per_block * (kernel - 1) * stacks * sum(dilation)
+model, opt = build_tcn(seq_len,
+	input_dim,
+	input_dim,
+	[1, 2, 4, 8],
+	filters=8,
+	kernel_size=5,
+	hidden_units=[8])
+
+model = train_model(model,
+	opt,
+	mse,
+	mse,
+	train_X,
+	train_y,
+	test_X,
+	test_y)
+
+
 y_true, y_pred = forecast(model, predict_data, seq_len=seq_len, forward=forward, stride=1)
 
 x_axis = np.arange(y_true.shape[1])
@@ -314,18 +554,4 @@ ax.plot(x_axis, y_pred[0,:], label='pred')
 plt.tight_layout()
 plt.show()
 plt.clf()
-
-
-# build covariance network
-model, opt = build_tcn_cov(seq_len,
-	input_dim,
-	input_dim,
-	[1, 2, 4, 8],
-	filters=8,
-	kernel_size=5,
-	hidden_units=[8],
-	cov_factors=8,
-	cov_kernel=2,
-	cov_filters=4)
-
 
