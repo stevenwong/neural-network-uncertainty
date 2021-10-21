@@ -202,9 +202,9 @@ class MultivariateGaussian(Layer):
 		# cov = K.dot(x, self.cov_kernel) + self.cov_bias
 		output_mu  = K.dot(x, self.mu_kernel) + self.mu_bias
 		idio_var = K.dot(x, self.idio_kernel) + self.idio_bias
+		idio_var = K.log(1 + K.exp(idio_var)) + 1e-08
 		idio_var = tf.squeeze(idio_var)
 		output_cov = K.dot(K.dot(x, cov), K.transpose(x)) + tf.linalg.diag(idio_var)
-		# cov = K.dot(K.dot(x, cov), K.transpose(x))
 		# output_cov = K.log(1 + K.exp(cov)) + 1e-06
 		return [output_mu, output_cov]
 
@@ -243,13 +243,8 @@ def build_gaussian_tcn(seq_len,
 	return model, opt
 
 
-# manually calculate MSE
-def mse(y, y_):
-	return K.mean(K.square(y - y_), axis=0)
-
-
 # negative log-likelihood multivariate normal
-def nll(y, out):
+def nll(y, out, tape=None):
 	u, v = out
 	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
 	return tf.reduce_mean(0.5 * tf.math.log(v) +
@@ -257,7 +252,7 @@ def nll(y, out):
 
 
 # negative log-likelihood
-def nll_mvn(y, out):
+def nll_mvn(y, out, tape=None):
 	u, v = out
 	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
 	e = y - u
@@ -265,10 +260,15 @@ def nll_mvn(y, out):
 		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e)) + 1e-6
 
 
-def squared_error(y, out):
+def squared_error(y, out, tape=None):
 	u, v = out
 	e = y - u
-	return tf.reduce_mean(tf.square(e)) + tf.reduce_mean(e @ tf.transpose(e) - v)
+	if tape is not None:
+		with tape.stop_recording():
+			V = K.dot(e, K.transpose(e))
+	else:
+		V = K.dot(e, K.transpose(e))
+	return tf.reduce_mean(tf.square(e)) + tf.reduce_mean(tf.square(V - v))
 
 
 def build_mvn_tcn(seq_len,
@@ -296,7 +296,7 @@ def build_mvn_tcn(seq_len,
 	output_layer = MultivariateGaussian(output_dim)(nn)
 
 	model = keras.Model(input_layer, output_layer)
-	opt = Adam(lr=0.01)
+	opt = Adam(lr=0.0001)
 	model.compile(loss=nll_mvn, optimizer=opt)
 
 	return model, opt
@@ -316,7 +316,7 @@ def build_mvn_tcn(seq_len,
 def calc_gradient(model, x, y, loss_fn):
 	with tf.GradientTape() as tape:
 		y_ = model(x)
-		loss = loss_fn(y, y_)
+		loss = loss_fn(y, y_, tape=tape)
 		grads = tape.gradient(loss, model.trainable_variables)
 	return loss, grads
 
@@ -455,8 +455,8 @@ model, opt = build_mvn_tcn(seq_len,
 
 model = train_model(model,
 	opt,
-	nll_mvn,
-	nll_mvn,
+	squared_error,
+	squared_error,
 	train_X,
 	train_y,
 	test_X,
@@ -466,8 +466,8 @@ model = train_model(model,
 
 # dummy example
 M = 2
-x = np.random.normal(0., 1., size=(1000, M)).astype('float32')
-y = np.atleast_2d(x.sum(axis=-1) + np.random.normal(0., 0.1, size=1000).astype('float32')).T
+x = np.random.normal(0., 1., size=(100, M)).astype('float32')
+y = np.atleast_2d(x.sum(axis=-1) + np.random.normal(0., 0.1, size=100).astype('float32')).T
 
 input_layer = Input(shape=(M))
 output_layer = MultivariateGaussian(1)(input_layer)
@@ -478,13 +478,13 @@ model.compile(loss='mse', optimizer=opt)
 
 model = train_model(model,
 	opt,
-	nll_mvn,
-	nll_mvn,
-	x[:500,:],
-	y[:500,:],
-	x[500:,:],
-	y[500:,:],
-	batch_size=50)
+	squared_error,
+	squared_error,
+	x[:50,:],
+	y[:50,:],
+	x[50:,:],
+	y[50:,:],
+	batch_size=10)
 
 
 """
