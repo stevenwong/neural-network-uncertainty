@@ -151,7 +151,8 @@ class GaussianLayer(Layer):
 	def call(self, x):
 		output_mu  = K.dot(x, self.kernel_1) + self.bias_1
 		output_sig = K.dot(x, self.kernel_2) + self.bias_2
-		output_sig_pos = K.log(1 + K.exp(output_sig)) + 1e-06  
+		# sigmoid transform only works with NLL loss
+		output_sig_pos = K.log(1 + K.exp(output_sig)) + 1e-06
 		return [output_mu, output_sig_pos]
 
 	def compute_output_shape(self, input_shape):
@@ -161,51 +162,93 @@ class GaussianLayer(Layer):
 class MultivariateGaussian(Layer):
 	def __init__(self, output_dim, **kwargs):
 		self.output_dim = output_dim
+		self.input_dim = None
 		super(MultivariateGaussian, self).__init__(**kwargs)
 
 	def build(self, input_shape):
 		input_dim = input_shape[-1]
-		print(input_dim)
 		# mu weights
 		self.mu_kernel = self.add_weight(name='mu_kernel', 
 										 shape=(input_dim, self.output_dim),
 										 initializer=GlorotNormal(),
 										 trainable=True)
-		# covariance weights
-		self.cov_kernel = self.add_weight(name='cov_kernel',
-										  shape=(input_dim, input_dim),
+		# correlation scaling kernel
+		self.rho_kernel = self.add_weight(name='rho_kernel',
+										  shape=(input_dim, ),
 										  initializer=GlorotNormal(),
 										  trainable=True)
-		# idiosyncratic variance kernel
-		self.idio_kernel = self.add_weight(name='idio_kernel', 
-										   shape=(input_dim, self.output_dim),
-										   initializer=GlorotNormal(),
-										   trainable=True)
+		# Convert latent representation to covariance space
+		# self.cov_kernel = self.add_weight(name='cov_kernel',
+		# 								  shape=(input_dim, ),
+		# 								  initializer=GlorotNormal(),
+		# 								  trainable=True)
+		# variance scaling kernel
+		self.var_kernel = self.add_weight(name='var_kernel',
+										  shape=(input_dim, self.output_dim),
+										  initializer=GlorotNormal(),
+										  trainable=True)
+		# scaling
+		# self.scale_kernel = self.add_weight(name='scale_kernel',
+		# 									shape=(input_dim, ),
+		# 									initializer=GlorotNormal(),
+		# 									trainable=True)
 		# mu bias
 		self.mu_bias = self.add_weight(name='mu_bias',
 									   shape=(self.output_dim, ),
 									   initializer=GlorotNormal(),
 									   trainable=True)
-		# idiosyncratic variance bias
-		self.idio_bias = self.add_weight(name='idio_bias',
-										 shape=(self.output_dim, ),
-										 initializer=GlorotNormal(),
-										 trainable=True)
+		# variance bias
+		self.var_bias = self.add_weight(name='var_bias',
+										shape=(self.output_dim, ),
+										initializer=GlorotNormal(),
+										trainable=True)
+		# scale bias
+		# self.scale_bias = self.add_weight(name='scale_bias',
+		# 								  shape=(self.output_dim, ),
+		# 								  initializer=GlorotNormal(),
+		# 								  trainable=True)
+		# covariance bias
+		# self.cov_bias = self.add_weight(name='cov_bias',
+		# 								shape=(self.output_dim, ),
+		# 								initializer=GlorotNormal(),
+		# 								trainable=True)
 		# number of entries in lower triangular matrix is N(N + 1) / 2
-		ones = tf.ones(int(input_dim * (input_dim + 1) / 2))
-		self.mask = tfp.math.fill_triangular(ones)
+		# ones = tf.ones(int(self.cov_dim * (self.cov_dim + 1) / 2))
+		# self.mask = tfp.math.fill_triangular(ones)
+		self.input_dim = input_dim
 		super(MultivariateGaussian, self).build(input_shape) 
 
 	def call(self, x):
-		cov = self.cov_kernel * self.mask
-		cov = K.dot(cov, K.transpose(cov)) # + tf.linalg.diag(self.cov_bias)
-		# cov = K.dot(x, self.cov_kernel) + self.cov_bias
+		# mean estimate
+		n = tf.shape(x)[0]
 		output_mu  = K.dot(x, self.mu_kernel) + self.mu_bias
-		idio_var = K.dot(x, self.idio_kernel) + self.idio_bias
-		idio_var = K.log(1 + K.exp(idio_var)) + 1e-08
-		idio_var = tf.squeeze(idio_var)
-		output_cov = K.dot(K.dot(x, cov), K.transpose(x)) + tf.linalg.diag(idio_var)
-		# output_cov = K.log(1 + K.exp(cov)) + 1e-06
+
+		# permutations of x. Has shape (n, n, input_dim)
+		a = tf.expand_dims(x, axis=1)
+		a = tf.tile(a, (1, n, 1))
+		# var_a = K.sum(a * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
+
+		b = tf.expand_dims(x, axis=0)
+		b = tf.tile(b, (n, 1, 1))
+		# var_b = K.sum(b * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
+
+		d = K.dot(x, self.var_kernel) + self.var_bias
+		# d = K.log(1 + K.exp(d)) + 1e-08
+		d = tf.squeeze(d)
+		d = tf.linalg.diag(d)
+
+		# scale = tf.concat([a, b], axis=2)
+		# scale = K.sum(a * b * self.scale_kernel, axis=-1) + self.scale_bias
+		# scale = K.log(1 + K.exp(scale)) + 1e-08
+
+		rho = K.sum(a * b * self.rho_kernel, axis=-1)
+		# rho = tf.tanh(K.sum(var_a * var_b, axis=-1))
+		# rho = tf.concat([a, b], axis=2)
+		# rho = tf.tanh(K.sum(rho * self.rho_kernel, axis=-1))
+		# cov = rho + d
+		cov = tf.linalg.set_diag(rho, d)
+		output_cov = tf.squeeze(cov)
+
 		return [output_mu, output_cov]
 
 	def compute_output_shape(self, input_shape):
@@ -248,26 +291,49 @@ def nll(y, out, tape=None):
 	u, v = out
 	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
 	return tf.reduce_mean(0.5 * tf.math.log(v) +
-		0.5 * tf.math.divide(tf.math.square(y - u), v)) + 1e-6
+		0.5 * tf.math.divide(tf.math.square(y - u), v))
 
 
 # negative log-likelihood
+# https://stats.stackexchange.com/questions/351549/maximum-likelihood-estimators-multivariate-gaussian
+# https://stats.stackexchange.com/questions/321152/covarince-matrix-has-to-be-be-rank-deficient-to-maximize-multivariate-gaussian-l
+# https://math.stackexchange.com/questions/3124194/determinant-of-covariance-matrix
+# https://math.stackexchange.com/questions/1479483/when-does-the-inverse-of-a-covariance-matrix-exist
+# For the covariance matrix to be invertible, it has to be positive definite (not PSD). Meaning, there exists
+# a \in R^n, such that Cov(s)a = 0. There exists some linear combination of X which has zero variance.
 def nll_mvn(y, out, tape=None):
 	u, v = out
 	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
 	e = y - u
+	print('det', tf.linalg.det(v))
+	print('v', v)
 	return tf.reduce_mean(0.5 * tf.math.log(tf.linalg.det(v)) +
-		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e)) + 1e-6
+		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e))
 
 
 def squared_error(y, out, tape=None):
+	# see `https://github.com/sthorn/deep-learning-explorations/blob/master/predicting-uncertainty-variance.ipynb`
+	u, v = out
+	e = y - u
+	# print('v', tf.linalg.det(v))
+	if tape is not None:
+		with tape.stop_recording():
+			V = K.dot(e, K.transpose(e))
+			# V = tf.square(e)
+	else:
+		V = K.dot(e, K.transpose(e))
+		# V = tf.square(e)
+	return tf.reduce_mean(tf.square(e)) + 10. * tf.reduce_mean(tf.square(V - v))
+
+
+def univariate_mse(y, out, tape=None):
 	u, v = out
 	e = y - u
 	if tape is not None:
 		with tape.stop_recording():
-			V = K.dot(e, K.transpose(e))
+			V = K.square(e)
 	else:
-		V = K.dot(e, K.transpose(e))
+		V = K.square(e)
 	return tf.reduce_mean(tf.square(e)) + tf.reduce_mean(tf.square(V - v))
 
 
@@ -296,7 +362,7 @@ def build_mvn_tcn(seq_len,
 	output_layer = MultivariateGaussian(output_dim)(nn)
 
 	model = keras.Model(input_layer, output_layer)
-	opt = Adam(lr=0.0001)
+	opt = Adam(lr=0.01)
 	model.compile(loss=nll_mvn, optimizer=opt)
 
 	return model, opt
@@ -413,7 +479,7 @@ def forecast(model, predict_data, seq_len=50, forward=10, stride=1):
 
 
 # predict for each period
-def forecast_gaussian(model, predict_data, seq_len=50, forward=10, stride=1):
+def forecast_gaussian(model, predict_data, seq_len=50, forward=10, stride=1, multivariate=False):
 	"""Step through the out-of-sample data and make predictions.
 
 	Args:
@@ -439,9 +505,14 @@ def forecast_gaussian(model, predict_data, seq_len=50, forward=10, stride=1):
 		y_pred.append(u)
 		y_var.append(v)
 
+	if multivariate:
+		y_var = np.stack(y_var, axis=-1)
+	else:
+		y_var = np.concatenate(y_var, axis=1)
+
 	return (np.concatenate(y_true, axis=1),
 			np.concatenate(y_pred, axis=1),
-			np.concatenate(y_var, axis=1))
+			y_var)
 
 
 # build multivariate normal network
@@ -461,13 +532,28 @@ model = train_model(model,
 	train_y,
 	test_X,
 	test_y,
-	batch_size=10)
+	batch_size=10,
+	max_epochs=100)
+
+y_true, y_pred, y_var = forecast_gaussian(model, predict_data, seq_len=seq_len,
+	forward=forward, stride=1, multivariate=True)
+
+x_axis = np.arange(y_true.shape[1])
+fig, ax = plt.subplots()
+i = 0
+ax.plot(x_axis, y_true[i,:], label='true')
+ax.plot(x_axis, y_pred[i,:], label='pred')
+ax.plot(x_axis, y_pred[i,:] + np.sqrt(y_var[i,i,:]), label='pred+std', linestyle='dotted', color='red')
+ax.plot(x_axis, y_pred[i,:] - np.sqrt(y_var[i,i,:]), label='pred-std', linestyle='dotted', color='red')
+plt.tight_layout()
+plt.show()
+plt.clf()
 
 
 # dummy example
-M = 2
+M = 1
 x = np.random.normal(0., 1., size=(100, M)).astype('float32')
-y = np.atleast_2d(x.sum(axis=-1) + np.random.normal(0., 0.1, size=100).astype('float32')).T
+y = np.atleast_2d(np.sin(x).sum(axis=-1) + np.random.normal(0., 0.1, size=100).astype('float32')).T
 
 input_layer = Input(shape=(M))
 output_layer = MultivariateGaussian(1)(input_layer)
@@ -521,6 +607,7 @@ ax.plot(x_axis, y_pred[0,:] - np.sqrt(y_var[0,:]), label='pred-std', linestyle='
 plt.tight_layout()
 plt.show()
 plt.clf()
+
 
 
 """
