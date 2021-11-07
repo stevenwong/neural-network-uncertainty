@@ -10,6 +10,7 @@ MIT License
 
 
 import numpy as np
+import pandas as pd
 import pickle
 import os
 import matplotlib.pyplot as plt
@@ -130,11 +131,11 @@ class GaussianLayer(Layer):
 
 	def build(self, input_shape):
 		input_dim = input_shape[-1]
-		self.kernel_1 = self.add_weight(name='kernel_1', 
+		self.kernel_1 = self.add_weight(name='kernel_1',
 									  shape=(input_dim, self.output_dim),
 									  initializer=GlorotNormal(),
 									  trainable=True)
-		self.kernel_2 = self.add_weight(name='kernel_2', 
+		self.kernel_2 = self.add_weight(name='kernel_2',
 									  shape=(input_dim, self.output_dim),
 									  initializer=GlorotNormal(),
 									  trainable=True)
@@ -146,7 +147,7 @@ class GaussianLayer(Layer):
 									shape=(self.output_dim, ),
 									initializer=GlorotNormal(),
 									trainable=True)
-		super(GaussianLayer, self).build(input_shape) 
+		super(GaussianLayer, self).build(input_shape)
 
 	def call(self, x):
 		output_mu  = K.dot(x, self.kernel_1) + self.bias_1
@@ -208,10 +209,10 @@ class MultivariateGaussian(Layer):
 		# 								  initializer=GlorotNormal(),
 		# 								  trainable=True)
 		# covariance bias
-		# self.cov_bias = self.add_weight(name='cov_bias',
-		# 								shape=(self.output_dim, ),
-		# 								initializer=GlorotNormal(),
-		# 								trainable=True)
+		self.cov_bias = self.add_weight(name='cov_bias',
+										shape=(self.output_dim, ),
+										initializer=GlorotNormal(),
+										trainable=True)
 		# number of entries in lower triangular matrix is N(N + 1) / 2
 		# ones = tf.ones(int(self.cov_dim * (self.cov_dim + 1) / 2))
 		# self.mask = tfp.math.fill_triangular(ones)
@@ -223,8 +224,9 @@ class MultivariateGaussian(Layer):
 		n = tf.shape(x)[0]
 		output_mu  = K.dot(x, self.mu_kernel) + self.mu_bias
 
+		# x has shape (n, input_dim)
 		# permutations of x. Has shape (n, n, input_dim)
-		a = tf.expand_dims(x, axis=1)
+		a = tf.expand_dims(x, axis=1)	# shape = (n, 1, input_dim)
 		a = tf.tile(a, (1, n, 1))
 		# var_a = K.sum(a * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
 
@@ -233,15 +235,17 @@ class MultivariateGaussian(Layer):
 		# var_b = K.sum(b * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
 
 		d = K.dot(x, self.var_kernel) + self.var_bias
-		# d = K.log(1 + K.exp(d)) + 1e-08
+		d = K.log(1 + K.exp(d)) + 1e-08
+		# d = tf.square(d)
 		d = tf.squeeze(d)
-		d = tf.linalg.diag(d)
+		# d = tf.linalg.diag(d)
 
 		# scale = tf.concat([a, b], axis=2)
 		# scale = K.sum(a * b * self.scale_kernel, axis=-1) + self.scale_bias
 		# scale = K.log(1 + K.exp(scale)) + 1e-08
+		# scale = tf.square(scale)
 
-		rho = K.sum(a * b * self.rho_kernel, axis=-1)
+		rho = K.sum(a * b * self.rho_kernel, axis=-1) + self.cov_bias # / (tf.norm(a, axis=-1) * tf.norm(b, axis=-1))
 		# rho = tf.tanh(K.sum(var_a * var_b, axis=-1))
 		# rho = tf.concat([a, b], axis=2)
 		# rho = tf.tanh(K.sum(rho * self.rho_kernel, axis=-1))
@@ -253,6 +257,89 @@ class MultivariateGaussian(Layer):
 
 	def compute_output_shape(self, input_shape):
 		return [(input_shape[0], self.output_dim), (input_shape[0], input_shape[0])]
+
+
+class CovarianceMatrix(Layer):
+	def __init__(self, output_dim=1, **kwargs):
+		self.output_dim = output_dim
+		self.input_dim = None
+		super(CovarianceMatrix, self).__init__(**kwargs)
+
+	def build(self, input_shape):
+		input_dim = input_shape[-1]
+		# correlation scaling kernel
+		# self.rho_kernel = self.add_weight(name='rho_kernel',
+		# 								  shape=(input_dim, ),
+		# 								  initializer=GlorotNormal(),
+		# 								  trainable=True)
+		# Convert latent representation to covariance space
+		self.cov_kernel = self.add_weight(name='cov_kernel',
+										  shape=(input_dim, ),
+										  initializer=GlorotNormal(),
+										  trainable=True)
+		# variance scaling kernel
+		self.var_kernel = self.add_weight(name='var_kernel',
+										  shape=(input_dim, self.output_dim),
+										  initializer=GlorotNormal(),
+										  trainable=True)
+		# scaling
+		# self.scale_kernel = self.add_weight(name='scale_kernel',
+		# 									shape=(input_dim, ),
+		# 									initializer=GlorotNormal(),
+		# 									trainable=True)
+		# variance bias
+		self.var_bias = self.add_weight(name='var_bias',
+										shape=(self.output_dim, ),
+										initializer=GlorotNormal(),
+										trainable=True)
+		# scale bias
+		# self.scale_bias = self.add_weight(name='scale_bias',
+		# 								  shape=(self.output_dim, ),
+		# 								  initializer=GlorotNormal(),
+		# 								  trainable=True)
+		# covariance bias
+		# self.cov_bias = self.add_weight(name='cov_bias',
+		# 								shape=(self.output_dim, ),
+		# 								initializer=GlorotNormal(),
+		# 								trainable=True)
+		self.input_dim = input_dim
+		super(CovarianceMatrix, self).build(input_shape) 
+
+	def call(self, x):
+		# mean estimate
+		n = tf.shape(x)[0]
+		# x has shape (n, input_dim)
+		# permutations of x. Has shape (n, n, input_dim)
+		a = tf.expand_dims(x, axis=1)	# shape = (n, 1, input_dim)
+		a = tf.tile(a, (1, n, 1))
+		# var_a = K.sum(a * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
+
+		b = tf.expand_dims(x, axis=0)
+		b = tf.tile(b, (n, 1, 1))
+		# var_b = K.sum(b * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
+
+		d = K.dot(x, self.var_kernel) + self.var_bias
+		d = K.log(1 + K.exp(d)) + 1e-08
+		# d = tf.square(d)
+		d = tf.squeeze(d)
+		# d = tf.linalg.diag(d)
+
+		# scale = tf.concat([a, b], axis=2)
+		# scale = K.sum(a * b * self.scale_kernel, axis=-1) + self.scale_bias
+		# scale = K.log(1 + K.exp(scale)) + 1e-08
+		# scale = tf.square(scale)
+
+		rho = K.sum(a * b * self.cov_kernel, axis=-1) # / (tf.norm(a, axis=-1) * tf.norm(b, axis=-1))
+		# rho = tf.concat([a, b], axis=2)
+		# rho = tf.tanh(K.sum(rho * self.rho_kernel, axis=-1))
+		# cov = rho + d
+		cov = tf.linalg.set_diag(rho, d)
+		output_cov = tf.squeeze(cov)
+
+		return output_cov
+
+	def compute_output_shape(self, input_shape):
+		return (input_shape[0], input_shape[0])
 
 
 def build_gaussian_tcn(seq_len,
@@ -305,8 +392,6 @@ def nll_mvn(y, out, tape=None):
 	u, v = out
 	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
 	e = y - u
-	print('det', tf.linalg.det(v))
-	print('v', v)
 	return tf.reduce_mean(0.5 * tf.math.log(tf.linalg.det(v)) +
 		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e))
 
@@ -324,6 +409,17 @@ def squared_error(y, out, tape=None):
 		V = K.dot(e, K.transpose(e))
 		# V = tf.square(e)
 	return tf.reduce_mean(tf.square(e)) + 10. * tf.reduce_mean(tf.square(V - v))
+
+record = []
+def cov_squared_error(y, v, tape=None):
+	# print('v', tf.linalg.det(v))
+	if tape is not None:
+		with tape.stop_recording():
+			V = K.dot(y, K.transpose(y))
+			record.append(V.numpy())
+	else:
+		V = K.dot(y, K.transpose(y))
+	return tf.reduce_mean(tf.square(V - v))
 
 
 def univariate_mse(y, out, tape=None):
@@ -368,15 +464,35 @@ def build_mvn_tcn(seq_len,
 	return model, opt
 
 
-# def train_mse_cov(model, x, y):
-# 	y_, exposures, cov = model(x)
-# 	e = y - y_
-# 	with tf.stop_recording():
-# 		S = e @ e.T
-# 		L = tf.linalg.cholesky(S)
-# 		mask = np.tril(np.ones_like(L))
+def build_cov_tcn(seq_len,
+				  input_dim,
+				  output_dim,
+				  dilation_rates,
+				  filters=8,
+				  kernel_size=5,
+				  hidden_units=[8]):
+	nn = input_layer = Input(shape=(seq_len, input_dim))
 
-# 	return K.mean(K.square(e), axis=0) + K.mean(K.square(exposures @ L - exposures @ (mask * cov)))
+	for i, d in enumerate(dilation_rates):
+		nn = Conv1D(dilation_rate=d,
+					filters=filters,
+					kernel_size=kernel_size,
+					padding='causal')(nn)
+		nn = BatchNormalization()(nn)
+		nn = Activation('relu')(nn)
+
+	nn = Lambda(lambda x: x[:, -1, :])(nn)
+
+	for u in hidden_units:
+		nn = Dense(u, activation='relu')(nn)
+
+	output_layer = CovarianceMatrix(output_dim)(nn)
+
+	model = keras.Model(input_layer, output_layer)
+	opt = Adam(lr=0.01)
+	model.compile(loss=nll_mvn, optimizer=opt)
+
+	return model, opt
 
 
 def calc_gradient(model, x, y, loss_fn):
@@ -384,6 +500,10 @@ def calc_gradient(model, x, y, loss_fn):
 		y_ = model(x)
 		loss = loss_fn(y, y_, tape=tape)
 		grads = tape.gradient(loss, model.trainable_variables)
+		if tf.math.is_nan(grads[-1][-1]):
+			print('grads', grads)
+			print('loss', loss)
+			raise 1
 	return loss, grads
 
 
@@ -417,8 +537,8 @@ def train_model(model,
 
 		for b in range(0, N, batch_size):
 			idx = permutations[b:b + batch_size]
-			batch_X = train_X[idx]
-			batch_y = train_y[idx]
+			batch_X = tf.convert_to_tensor(train_X[idx])
+			batch_y = tf.convert_to_tensor(train_y[idx])
 
 			loss, grads = calc_gradient(model, batch_X, batch_y, train_criterion)
 			optimiser.apply_gradients(zip(grads, model.trainable_variables))
@@ -515,6 +635,46 @@ def forecast_gaussian(model, predict_data, seq_len=50, forward=10, stride=1, mul
 			y_var)
 
 
+def forecast_covariance(model, predict_data, seq_len=50, forward=10, stride=1, multivariate=False):
+	"""Step through the out-of-sample data and make predictions.
+
+	Args:
+		model (keras.Model): Trained model.
+		predict_data (numpy.array): Out-of-sample data.
+		seq_len (int): Sequence length.
+		forward (int): Forward.
+		stride (int): Step size.
+
+	Returns:
+		numpy.array: Predicted values.
+
+	"""
+
+	T = predict_data.shape[1]
+	y_true = []
+	y_var = []
+	for t in range(seq_len, T - forward, stride):
+		y_ = predict_data[:,t + forward - 1,:]
+		y_ = y_ @ y_.T
+		y_true.append(y_)
+		X = predict_data[:,t-seq_len:t,:]
+		v = model.predict(X, batch_size=X.shape[0])
+		y_var.append(v)
+
+	y_true = np.stack(y_true, axis=-1)
+	y_var = np.stack(y_var, axis=-1)
+	return y_true, y_var
+
+
+class EmpiricalCovariance():
+	def __init__(self, forward):
+		self.forward = forward
+
+	def predict(self, X, batch_size=None):
+		X = X[:,::self.forward,:]
+		return np.cov(X.squeeze())
+
+
 # build multivariate normal network
 model, opt = build_mvn_tcn(seq_len,
 	input_dim,
@@ -537,6 +697,54 @@ model = train_model(model,
 
 y_true, y_pred, y_var = forecast_gaussian(model, predict_data, seq_len=seq_len,
 	forward=forward, stride=1, multivariate=True)
+
+x_axis = np.arange(y_true.shape[1])
+fig, ax = plt.subplots()
+i = 0
+ax.plot(x_axis, y_true[i,:], label='true')
+ax.plot(x_axis, y_pred[i,:], label='pred')
+ax.plot(x_axis, y_pred[i,:] + np.sqrt(y_var[i,i,:]), label='pred+std', linestyle='dotted', color='red')
+ax.plot(x_axis, y_pred[i,:] - np.sqrt(y_var[i,i,:]), label='pred-std', linestyle='dotted', color='red')
+plt.tight_layout()
+plt.show()
+plt.clf()
+
+
+# build covariance network
+model, opt = build_cov_tcn(seq_len,
+	input_dim,
+	input_dim,
+	[1, 2, 4, 8],
+	filters=16,
+	kernel_size=5,
+	hidden_units=[32, 16])
+
+model = train_model(model,
+	opt,
+	cov_squared_error,
+	cov_squared_error,
+	train_X,
+	train_y,
+	test_X,
+	test_y,
+	batch_size=10,
+	max_epochs=100)
+
+y_true, y_var = forecast_covariance(model, predict_data, seq_len=seq_len,
+	forward=forward, stride=1, multivariate=True)
+
+cnn_mse = np.mean((y_true - y_var) ** 2)
+
+y_true_avg = np.stack([y_true[:,:,i:i+10].mean(axis=-1) for i in range(0, y_true.shape[-1], 10)], axis=-1)
+y_var_avg = np.stack([y_var[:,:,i:i+10].mean(axis=-1) for i in range(0, y_var.shape[-1], 10)], axis=-1)
+
+# approximate covariance empirically
+em = EmpiricalCovariance(10)
+_, empirical = forecast_covariance(em, predict_data, seq_len=seq_len,
+	forward=forward, stride=1, multivariate=True)
+
+em_mse = np.mean((y_true - empirical) ** 2)
+
 
 x_axis = np.arange(y_true.shape[1])
 fig, ax = plt.subplots()
