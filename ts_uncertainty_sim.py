@@ -27,7 +27,8 @@ T = 2000
 
 X = np.tile(np.arange(T), (N, 1)) / T * 30 # + np.atleast_2d(np.arange(N) * 2 / np.pi).T
 X[int(N/2):,:] = X[int(N/2):,:] + np.pi
-Y = np.sin(X) + rng.normal(0., 0.2, size=(N, T)) * (np.abs(np.sin(X)))
+e = rng.normal(0., 0.1, size=(N, T)) * (np.abs(np.sin(X)))
+Y = np.sin(X) + e
 
 pd.DataFrame(Y.T).plot()
 plt.show()
@@ -39,6 +40,34 @@ Y = Y.astype('float32')
 Y = np.expand_dims(Y, axis=-1)
 
 pickle.dump(Y, open('uncertain_sim.pkl', 'wb'))
+pickle.dump(e, open('uncertain_e.pkl', 'wb'))
+
+
+"""
+Single pattern
+"""
+rng = default_rng()
+
+N = 10
+M = 1
+T = 2000
+
+X = np.tile(np.arange(T), (N, 1)) / T * 30 # + np.atleast_2d(np.arange(N) * 2 / np.pi).T
+# X[int(N/2):,:] = X[int(N/2):,:] + np.pi
+e = rng.normal(0., 0.1, size=(N, T)) * (np.abs(np.sin(X)))
+Y = np.sin(X) + e
+
+pd.DataFrame(Y.T).plot()
+plt.show()
+plt.clf()
+
+
+X = X.astype('float32')
+Y = Y.astype('float32')
+Y = np.expand_dims(Y, axis=-1)
+
+pickle.dump(Y, open('uncertain_sim3.pkl', 'wb'))
+pickle.dump(e, open('uncertain_e3.pkl', 'wb'))
 
 
 """
@@ -62,8 +91,8 @@ d = rng.gamma(1., 0.1, size=N) + 1e-6
 np.fill_diagonal(c, d)
 u = np.zeros(N)
 
-e = rng.multivariate_normal(u, c, size=T).T
-Y = np.sin(X) + e * (np.abs(np.sin(X)))
+e = rng.multivariate_normal(u, c, size=T).T * (np.abs(np.sin(X)))
+Y = np.sin(X) + e
 
 pd.DataFrame(Y.T).plot()
 plt.show()
@@ -75,4 +104,5 @@ Y = Y.astype('float32')
 Y = np.expand_dims(Y, axis=-1)
 
 pickle.dump(Y, open('uncertain_sim2.pkl', 'wb'))
+pickle.dump(e, open('uncertain_e2.pkl', 'wb'))
 

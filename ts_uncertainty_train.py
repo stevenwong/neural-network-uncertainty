@@ -2,7 +2,7 @@
 
 Simulate neural network uncertainty.
 
-Copyright (C) 2020 Steven Wong <steven.ykwong87@gmail.com>
+Copyright (C) 2021 Steven Wong <steven.ykwong87@gmail.com>
 
 MIT License
 
@@ -17,8 +17,6 @@ import matplotlib.pyplot as plt
 
 # TF imports
 import tensorflow as tf
-from tensorflow.python.keras.backend import dtype
-from tensorflow.python.ops.gen_math_ops import Mul, mean
 physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
 	try:
@@ -31,11 +29,12 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from tensorflow import keras
 import tensorflow.keras.backend as K
 
-from tensorflow.keras.layers import Dense, Conv1D, BatchNormalization, Layer
+from tensorflow.keras.layers import Dense, Conv1D, BatchNormalization
 from tensorflow.keras.layers import Input, Lambda, Activation
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.initializers import GlorotNormal
-import tensorflow_probability as tfp
+
+from network import *
+
 
 # for manual training loop
 from sklearn.metrics import mean_squared_error
@@ -71,7 +70,14 @@ def create_sequences(data,
 	return np.concatenate(X), np.concatenate(y)
 
 
-X = pickle.load(open('uncertain_sim.pkl', 'rb'))
+X = pickle.load(open('uncertain_sim3.pkl', 'rb'))
+e = pickle.load(open('uncertain_e3.pkl', 'rb'))
+
+e2 = []
+for i in range(e.shape[-1]):
+	v = e[:,[i]]
+	e2.append(v @ v.T)
+e2 = np.stack(e2, axis=-1)
 
 # constants
 N, T, input_dim = X.shape
@@ -124,224 +130,6 @@ def build_tcn(seq_len,
 	return model, opt
 
 
-class GaussianLayer(Layer):
-	def __init__(self, output_dim, **kwargs):
-		self.output_dim = output_dim
-		super(GaussianLayer, self).__init__(**kwargs)
-
-	def build(self, input_shape):
-		input_dim = input_shape[-1]
-		self.kernel_1 = self.add_weight(name='kernel_1',
-									  shape=(input_dim, self.output_dim),
-									  initializer=GlorotNormal(),
-									  trainable=True)
-		self.kernel_2 = self.add_weight(name='kernel_2',
-									  shape=(input_dim, self.output_dim),
-									  initializer=GlorotNormal(),
-									  trainable=True)
-		self.bias_1 = self.add_weight(name='bias_1',
-									shape=(self.output_dim, ),
-									initializer=GlorotNormal(),
-									trainable=True)
-		self.bias_2 = self.add_weight(name='bias_2',
-									shape=(self.output_dim, ),
-									initializer=GlorotNormal(),
-									trainable=True)
-		super(GaussianLayer, self).build(input_shape)
-
-	def call(self, x):
-		output_mu  = K.dot(x, self.kernel_1) + self.bias_1
-		output_sig = K.dot(x, self.kernel_2) + self.bias_2
-		# sigmoid transform only works with NLL loss
-		output_sig_pos = K.log(1 + K.exp(output_sig)) + 1e-06
-		return [output_mu, output_sig_pos]
-
-	def compute_output_shape(self, input_shape):
-		return [(input_shape[0], self.output_dim), (input_shape[0], self.output_dim)]
-
-
-class MultivariateGaussian(Layer):
-	def __init__(self, output_dim, **kwargs):
-		self.output_dim = output_dim
-		self.input_dim = None
-		super(MultivariateGaussian, self).__init__(**kwargs)
-
-	def build(self, input_shape):
-		input_dim = input_shape[-1]
-		# mu weights
-		self.mu_kernel = self.add_weight(name='mu_kernel', 
-										 shape=(input_dim, self.output_dim),
-										 initializer=GlorotNormal(),
-										 trainable=True)
-		# correlation scaling kernel
-		self.rho_kernel = self.add_weight(name='rho_kernel',
-										  shape=(input_dim, ),
-										  initializer=GlorotNormal(),
-										  trainable=True)
-		# Convert latent representation to covariance space
-		# self.cov_kernel = self.add_weight(name='cov_kernel',
-		# 								  shape=(input_dim, ),
-		# 								  initializer=GlorotNormal(),
-		# 								  trainable=True)
-		# variance scaling kernel
-		self.var_kernel = self.add_weight(name='var_kernel',
-										  shape=(input_dim, self.output_dim),
-										  initializer=GlorotNormal(),
-										  trainable=True)
-		# scaling
-		# self.scale_kernel = self.add_weight(name='scale_kernel',
-		# 									shape=(input_dim, ),
-		# 									initializer=GlorotNormal(),
-		# 									trainable=True)
-		# mu bias
-		self.mu_bias = self.add_weight(name='mu_bias',
-									   shape=(self.output_dim, ),
-									   initializer=GlorotNormal(),
-									   trainable=True)
-		# variance bias
-		self.var_bias = self.add_weight(name='var_bias',
-										shape=(self.output_dim, ),
-										initializer=GlorotNormal(),
-										trainable=True)
-		# scale bias
-		# self.scale_bias = self.add_weight(name='scale_bias',
-		# 								  shape=(self.output_dim, ),
-		# 								  initializer=GlorotNormal(),
-		# 								  trainable=True)
-		# covariance bias
-		self.cov_bias = self.add_weight(name='cov_bias',
-										shape=(self.output_dim, ),
-										initializer=GlorotNormal(),
-										trainable=True)
-		# number of entries in lower triangular matrix is N(N + 1) / 2
-		# ones = tf.ones(int(self.cov_dim * (self.cov_dim + 1) / 2))
-		# self.mask = tfp.math.fill_triangular(ones)
-		self.input_dim = input_dim
-		super(MultivariateGaussian, self).build(input_shape) 
-
-	def call(self, x):
-		# mean estimate
-		n = tf.shape(x)[0]
-		output_mu  = K.dot(x, self.mu_kernel) + self.mu_bias
-
-		# x has shape (n, input_dim)
-		# permutations of x. Has shape (n, n, input_dim)
-		a = tf.expand_dims(x, axis=1)	# shape = (n, 1, input_dim)
-		a = tf.tile(a, (1, n, 1))
-		# var_a = K.sum(a * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
-
-		b = tf.expand_dims(x, axis=0)
-		b = tf.tile(b, (n, 1, 1))
-		# var_b = K.sum(b * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
-
-		d = K.dot(x, self.var_kernel) + self.var_bias
-		d = K.log(1 + K.exp(d)) + 1e-08
-		# d = tf.square(d)
-		d = tf.squeeze(d)
-		# d = tf.linalg.diag(d)
-
-		# scale = tf.concat([a, b], axis=2)
-		# scale = K.sum(a * b * self.scale_kernel, axis=-1) + self.scale_bias
-		# scale = K.log(1 + K.exp(scale)) + 1e-08
-		# scale = tf.square(scale)
-
-		rho = K.sum(a * b * self.rho_kernel, axis=-1) + self.cov_bias # / (tf.norm(a, axis=-1) * tf.norm(b, axis=-1))
-		# rho = tf.tanh(K.sum(var_a * var_b, axis=-1))
-		# rho = tf.concat([a, b], axis=2)
-		# rho = tf.tanh(K.sum(rho * self.rho_kernel, axis=-1))
-		# cov = rho + d
-		cov = tf.linalg.set_diag(rho, d)
-		output_cov = tf.squeeze(cov)
-
-		return [output_mu, output_cov]
-
-	def compute_output_shape(self, input_shape):
-		return [(input_shape[0], self.output_dim), (input_shape[0], input_shape[0])]
-
-
-class CovarianceMatrix(Layer):
-	def __init__(self, output_dim=1, **kwargs):
-		self.output_dim = output_dim
-		self.input_dim = None
-		super(CovarianceMatrix, self).__init__(**kwargs)
-
-	def build(self, input_shape):
-		input_dim = input_shape[-1]
-		# correlation scaling kernel
-		# self.rho_kernel = self.add_weight(name='rho_kernel',
-		# 								  shape=(input_dim, ),
-		# 								  initializer=GlorotNormal(),
-		# 								  trainable=True)
-		# Convert latent representation to covariance space
-		self.cov_kernel = self.add_weight(name='cov_kernel',
-										  shape=(input_dim, ),
-										  initializer=GlorotNormal(),
-										  trainable=True)
-		# variance scaling kernel
-		self.var_kernel = self.add_weight(name='var_kernel',
-										  shape=(input_dim, self.output_dim),
-										  initializer=GlorotNormal(),
-										  trainable=True)
-		# scaling
-		# self.scale_kernel = self.add_weight(name='scale_kernel',
-		# 									shape=(input_dim, ),
-		# 									initializer=GlorotNormal(),
-		# 									trainable=True)
-		# variance bias
-		self.var_bias = self.add_weight(name='var_bias',
-										shape=(self.output_dim, ),
-										initializer=GlorotNormal(),
-										trainable=True)
-		# scale bias
-		# self.scale_bias = self.add_weight(name='scale_bias',
-		# 								  shape=(self.output_dim, ),
-		# 								  initializer=GlorotNormal(),
-		# 								  trainable=True)
-		# covariance bias
-		# self.cov_bias = self.add_weight(name='cov_bias',
-		# 								shape=(self.output_dim, ),
-		# 								initializer=GlorotNormal(),
-		# 								trainable=True)
-		self.input_dim = input_dim
-		super(CovarianceMatrix, self).build(input_shape) 
-
-	def call(self, x):
-		# mean estimate
-		n = tf.shape(x)[0]
-		# x has shape (n, input_dim)
-		# permutations of x. Has shape (n, n, input_dim)
-		a = tf.expand_dims(x, axis=1)	# shape = (n, 1, input_dim)
-		a = tf.tile(a, (1, n, 1))
-		# var_a = K.sum(a * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
-
-		b = tf.expand_dims(x, axis=0)
-		b = tf.tile(b, (n, 1, 1))
-		# var_b = K.sum(b * tf.squeeze(self.var_kernel), axis=-1) + self.var_bias
-
-		d = K.dot(x, self.var_kernel) + self.var_bias
-		d = K.log(1 + K.exp(d)) + 1e-08
-		# d = tf.square(d)
-		d = tf.squeeze(d)
-		# d = tf.linalg.diag(d)
-
-		# scale = tf.concat([a, b], axis=2)
-		# scale = K.sum(a * b * self.scale_kernel, axis=-1) + self.scale_bias
-		# scale = K.log(1 + K.exp(scale)) + 1e-08
-		# scale = tf.square(scale)
-
-		rho = K.sum(a * b * self.cov_kernel, axis=-1) # / (tf.norm(a, axis=-1) * tf.norm(b, axis=-1))
-		# rho = tf.concat([a, b], axis=2)
-		# rho = tf.tanh(K.sum(rho * self.rho_kernel, axis=-1))
-		# cov = rho + d
-		cov = tf.linalg.set_diag(rho, d)
-		output_cov = tf.squeeze(cov)
-
-		return output_cov
-
-	def compute_output_shape(self, input_shape):
-		return (input_shape[0], input_shape[0])
-
-
 def build_gaussian_tcn(seq_len,
 					   input_dim,
 					   output_dim,
@@ -368,17 +156,9 @@ def build_gaussian_tcn(seq_len,
 
 	model = keras.Model(input_layer, output_layer)
 	opt = Adam(lr=0.01)
-	model.compile(loss='mse', optimizer=opt)
+	model.compile(loss=nll, optimizer=opt)
 
 	return model, opt
-
-
-# negative log-likelihood multivariate normal
-def nll(y, out, tape=None):
-	u, v = out
-	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
-	return tf.reduce_mean(0.5 * tf.math.log(v) +
-		0.5 * tf.math.divide(tf.math.square(y - u), v))
 
 
 # negative log-likelihood
@@ -493,82 +273,6 @@ def build_cov_tcn(seq_len,
 	model.compile(loss=nll_mvn, optimizer=opt)
 
 	return model, opt
-
-
-def calc_gradient(model, x, y, loss_fn):
-	with tf.GradientTape() as tape:
-		y_ = model(x)
-		loss = loss_fn(y, y_, tape=tape)
-		grads = tape.gradient(loss, model.trainable_variables)
-		if tf.math.is_nan(grads[-1][-1]):
-			print('grads', grads)
-			print('loss', loss)
-			raise 1
-	return loss, grads
-
-
-def train_model(model,
-				optimiser,
-				train_criterion,
-				test_criterion,
-				train_X,
-				train_y,
-				test_X,
-				test_y,
-				batch_size=1000,
-				max_epochs=100,
-				min_delta=0.0001,
-				patience=10):
-	N = train_X.shape[0]
-	B = math.ceil(N / batch_size)
-
-	# for early stopping
-	best_loss = np.inf
-	best_weights = None
-	best_epochs = 0
-	counter = 0
-
-	test_X = tf.convert_to_tensor(test_X)
-	test_y = tf.convert_to_tensor(test_y)
-
-	for e in range(max_epochs):
-		permutations = np.random.permutation(N)
-		sum_loss = 0.
-
-		for b in range(0, N, batch_size):
-			idx = permutations[b:b + batch_size]
-			batch_X = tf.convert_to_tensor(train_X[idx])
-			batch_y = tf.convert_to_tensor(train_y[idx])
-
-			loss, grads = calc_gradient(model, batch_X, batch_y, train_criterion)
-			optimiser.apply_gradients(zip(grads, model.trainable_variables))
-			loss = loss.numpy().item()
-			sum_loss += loss
-
-		sum_loss = sum_loss / B
-		y_ = model.predict(test_X, batch_size=test_X.shape[0])
-		val_loss = test_criterion(test_y, y_)
-		if isinstance(val_loss, tf.Tensor):
-			val_loss = val_loss.numpy().item()
-
-		print(f'| Epoch {e}/{max_epochs} - loss: {loss:.4f} - val {val_loss:.4f}')
-
-		if val_loss + min_delta >= best_loss:
-			counter += 1
-		else:
-			counter = 0
-
-		if val_loss < best_loss:
-			best_loss = val_loss
-			best_weights = model.get_weights()
-			best_epochs = e
-
-		if counter >= patience:
-			model.set_weights(best_weights)
-			print(f'Best epochs: {best_epochs}')
-			break
-
-	return model
 
 
 # predict for each period
