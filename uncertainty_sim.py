@@ -24,16 +24,17 @@ T = 100
 N = 10
 M = 5
 
-X = rng.normal(0., 1., size=(T, N, M))
+X = rng.normal(0., 1., size=(N, N, M))
+X = np.tile(X, (int(T / N), 1, 1))
 
 covs = []
 ys = []
 errors = []
 for t in range(T):
 	cov = 0.1 * X[t,:,[0]].T @ X[t,:,[0]]
-	cov = np.tril(cov)
-	cov = cov @ cov.T
-	d = rng.gamma(1., 0.1, size=N) + 1e-6
+	# cov = np.tril(cov)
+	# cov = cov @ cov.T
+	d = np.log(1. + np.exp(X[t,:,:].mean(axis=-1) - 2))
 	np.fill_diagonal(cov, d)
 	covs.append(cov)
 

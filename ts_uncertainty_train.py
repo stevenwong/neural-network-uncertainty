@@ -161,35 +161,6 @@ def build_gaussian_tcn(seq_len,
 	return model, opt
 
 
-# negative log-likelihood
-# https://stats.stackexchange.com/questions/351549/maximum-likelihood-estimators-multivariate-gaussian
-# https://stats.stackexchange.com/questions/321152/covarince-matrix-has-to-be-be-rank-deficient-to-maximize-multivariate-gaussian-l
-# https://math.stackexchange.com/questions/3124194/determinant-of-covariance-matrix
-# https://math.stackexchange.com/questions/1479483/when-does-the-inverse-of-a-covariance-matrix-exist
-# For the covariance matrix to be invertible, it has to be positive definite (not PSD). Meaning, there exists
-# a \in R^n, such that Cov(s)a = 0. There exists some linear combination of X which has zero variance.
-def nll_mvn(y, out, tape=None):
-	u, v = out
-	# NLL = log(var(x))/2 + (y - u(x))^2 / 2var(x)
-	e = y - u
-	return tf.reduce_mean(0.5 * tf.math.log(tf.linalg.det(v)) +
-		0.5 * K.dot(K.dot(K.transpose(e), tf.linalg.inv(v)), e))
-
-
-def squared_error(y, out, tape=None):
-	# see `https://github.com/sthorn/deep-learning-explorations/blob/master/predicting-uncertainty-variance.ipynb`
-	u, v = out
-	e = y - u
-	# print('v', tf.linalg.det(v))
-	if tape is not None:
-		with tape.stop_recording():
-			V = K.dot(e, K.transpose(e))
-			# V = tf.square(e)
-	else:
-		V = K.dot(e, K.transpose(e))
-		# V = tf.square(e)
-	return tf.reduce_mean(tf.square(e)) + 10. * tf.reduce_mean(tf.square(V - v))
-
 record = []
 def cov_squared_error(y, v, tape=None):
 	# print('v', tf.linalg.det(v))
