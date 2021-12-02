@@ -131,12 +131,11 @@ def build_train_mvn(params, train_X, train_y, test_X, test_y, metric):
 best_params, scores = hyperparameter_search({'hidden_units': [[8], [16, 8], [32, 16, 8]], 'cov_dim': [1, 2, 4, 8]},
 	build_train_mvn, train_X, train_y, test_X, test_y, var_mse, n_cpu=1)
 
-model, opt = build_mvn(input_dim, 1, **best_params)
-
 y_true = []
 y_pred = []
 cov_pred = []
 for i in range(10):
+	model, opt = build_mvn(input_dim, 1, **best_params)
 	model = train_model(model,
 		opt,
 		var_mse,
@@ -160,8 +159,8 @@ cov_pred = np.stack(cov_pred, axis=0)
 u = []
 for i in range(y_true.shape[0]):
 	for m in range(10):
-		y = y_pred[m,i,:,:]
-		v = y @ y.T
+		y_ = y_pred[m,i,:,:]
+		v = y_ @ y_.T
 		cov = cov_pred[m,i,:,:]
 		cov_pred[m,i,:,:] = cov + v
 
@@ -170,11 +169,14 @@ cov_pred = cov_pred.mean(axis=0)
 cov_true = forecast_error(y_true, y_pred, var_type='y')
 
 for i in range(y_true.shape[0]):
-	y = y_pred[i,:,:]
+	y_ = y_pred[i,:,:]
 	# Cov(X) = E(X @ X.T) - E(X) @ E(X).T
-	cov_pred[i,:,:] = cov_pred[i,:,:] - y @ y.T
+	cov_pred[i,:,:] = cov_pred[i,:,:] - y_ @ y_.T
 
 scores = score(y_true, y_pred, cov_true, cov_pred)
+
+empirical_cov = np.cov(y[:80,:,:].squeeze(), rowvar=False)
+empirical_scores = score(y_true, y_pred, cov_true, np.tile(np.expand_dims(empirical_cov, axis=0), (20, 1, 1)))
 
 
 """
