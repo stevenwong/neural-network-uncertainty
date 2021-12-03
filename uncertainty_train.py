@@ -170,7 +170,8 @@ cov_true = forecast_error(y_true, y_pred, var_type='y')
 
 for i in range(y_true.shape[0]):
 	y_ = y_pred[i,:,:]
-	# Cov(X) = E(X @ X.T) - E(X) @ E(X).T
+	# Cov(y|X) = E(y @ y.T) - E(y|X) @ E(y|X).T
+	# y_ = F(X,theta)
 	cov_pred[i,:,:] = cov_pred[i,:,:] - y_ @ y_.T
 
 scores = score(y_true, y_pred, cov_true, cov_pred)
